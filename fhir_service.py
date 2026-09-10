@@ -11,8 +11,28 @@ LOCATION = "us-central1"
 DATASET_ID = "longevity-clinical-data"
 STORE_ID = "user-vitals-store"
 
+class PatientNotFoundError(Exception):
+    pass
+
+class UnsupportedTypeError(Exception):
+    pass
+
+LOINC_MAP = {
+    "weight": {"code": "29463-7", "display": "Body Weight", "default_unit": "kg"},
+    "body_weight": {"code": "29463-7", "display": "Body Weight", "default_unit": "kg"},
+    "height": {"code": "8302-2", "display": "Body Height", "default_unit": "cm"},
+    "body_height": {"code": "8302-2", "display": "Body Height", "default_unit": "cm"},
+    "heart_rate": {"code": "8867-4", "display": "Heart rate", "default_unit": "bpm"},
+    "blood_glucose": {"code": "15074-8", "display": "Glucose in Blood", "default_unit": "mg/dL"},
+    "body_temperature": {"code": "8310-5", "display": "Body temperature", "default_unit": "C"},
+    "oxygen_saturation": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
+    "spo2": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
+    "body_fat": {"code": "41982-0", "display": "Percentage body fat", "default_unit": "%"},
+}
+
+CODE_TO_TYPE_MAP = {v["code"]: k for k, v in LOINC_MAP.items()}
+
 def get_db_connection():
-    """Establishes a connection to the PostgreSQL database."""
     db_user = os.environ.get("DB_USER", "postgres")
     db_pass = os.environ.get("DB_PASS")
     db_name = os.environ.get("DB_NAME", "longevity_app")
@@ -25,18 +45,12 @@ def get_db_connection():
     )
 
 def get_gcp_token() -> str:
-    """Generates an OAuth 2.0 token using Cloud Run's service account identity."""
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     credentials, _ = google.auth.default(scopes=scopes)
     credentials.refresh(Request())
     return credentials.token
 
 def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str:
-    """
-    Called when Provider clicks 'Create Medical Record' in Lovable.
-    Retrieves the existing user from PostgreSQL, uses their saved WhatsApp profile data 
-    to create the GCP FHIR Patient resource, and links the fhir_patient_id back to PostgreSQL.
-    """
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -48,7 +62,7 @@ def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str
         row = cur.fetchone()
 
         if not row:
-            raise Exception(f"User with phone_number '{phone_number}' does not exist in PostgreSQL.")
+            raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
 
         fhir_patient_id, db_first_name = row[0], row[1]
 
@@ -69,25 +83,14 @@ def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str
 
         payload = {
             "resourceType": "Patient",
-            "identifier": [
-                {
-                    "system": "https://whatsapp.com",
-                    "value": phone_number
-                }
-            ],
-            "name": [
-                {
-                    "use": "official",
-                    "given": [patient_name]
-                }
-            ]
+            "identifier": [{"system": "https://whatsapp.com", "value": phone_number}],
+            "name": [{"use": "official", "given": [patient_name]}]
         }
 
         res = requests.post(fhir_url, headers=headers, json=payload)
 
         if res.status_code in [200, 201]:
             fhir_patient_id = res.json().get("id")
-
             cur.execute(
                 "UPDATE users SET fhir_patient_id = %s WHERE phone_number = %s;",
                 (fhir_patient_id, phone_number)
@@ -102,9 +105,6 @@ def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str
         conn.close()
 
 def get_fhir_patient_record(phone_number: str) -> dict:
-    """
-    Retrieves the raw FHIR Patient resource from GCP Healthcare API using the user's phone number.
-    """
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -112,8 +112,10 @@ def get_fhir_patient_record(phone_number: str) -> dict:
         cur.execute("SELECT fhir_patient_id FROM users WHERE phone_number = %s;", (phone_number,))
         row = cur.fetchone()
 
-        if not row or not row[0]:
-            raise Exception(f"No FHIR Patient record found for phone number '{phone_number}'.")
+        if not row:
+            raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
+        if not row[0]:
+            raise PatientNotFoundError(f"No FHIR Patient record found for phone_number '{phone_number}'.")
 
         fhir_patient_id = row[0]
 
@@ -139,27 +141,31 @@ def get_fhir_patient_record(phone_number: str) -> dict:
         conn.close()
 
 def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit: str) -> str:
-    """
-    Creates a new FHIR Observation resource (e.g., Weight, Height) linked to the patient.
-    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("SELECT fhir_patient_id FROM users WHERE phone_number = %s;", (phone_number,))
         row = cur.fetchone()
-        if not row or not row[0]:
-            raise Exception(f"No FHIR Patient record found for '{phone_number}'.")
+        if not row:
+            raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
+        if not row[0]:
+            raise PatientNotFoundError(f"No FHIR Patient record found for '{phone_number}'.")
         
         fhir_patient_id = row[0]
+        obs_key = obs_type.lower().strip()
         
-        if obs_type.lower() == "weight":
-            code = {"coding": [{"system": "http://loinc.org", "code": "29463-7", "display": "Body Weight"}]}
-        elif obs_type.lower() == "height":
-            code = {"coding": [{"system": "http://loinc.org", "code": "8302-2", "display": "Body Height"}]}
-        elif obs_type.lower() == "heart_rate":
-            code = {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]}
-        else:
-            raise Exception(f"Unsupported observation type: {obs_type}")
+        if obs_key not in LOINC_MAP:
+            supported = ", ".join(sorted(set(LOINC_MAP.keys())))
+            raise UnsupportedTypeError(f"Unsupported observation type '{obs_type}'. Supported types: {supported}")
+
+        type_info = LOINC_MAP[obs_key]
+        code_payload = {
+            "coding": [{
+                "system": "http://loinc.org",
+                "code": type_info["code"],
+                "display": type_info["display"]
+            }]
+        }
 
         fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation"
         headers = {"Authorization": f"Bearer {get_gcp_token()}", "Content-Type": "application/fhir+json; charset=utf-8"}
@@ -168,7 +174,7 @@ def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit
             "resourceType": "Observation",
             "status": "final",
             "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}]}],
-            "code": code,
+            "code": code_payload,
             "subject": {"reference": f"Patient/{fhir_patient_id}"},
             "effectiveDateTime": datetime.datetime.utcnow().isoformat() + "Z",
             "valueQuantity": {
@@ -183,7 +189,70 @@ def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit
         if res.status_code in [200, 201]:
             return res.json().get("id")
         else:
-            raise Exception(f"GCP FHIR Error: {res.text}")
+            raise Exception(f"GCP FHIR Store Error ({res.status_code}): {res.text}")
+    finally:
+        cur.close()
+        conn.close()
+
+def get_fhir_patient_observations(phone_number: str) -> list:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT fhir_patient_id FROM users WHERE phone_number = %s;", (phone_number,))
+        row = cur.fetchone()
+        if not row:
+            raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
+        if not row[0]:
+            raise PatientNotFoundError(f"No FHIR Patient record found for '{phone_number}'.")
+
+        fhir_patient_id = row[0]
+
+        fhir_url = (
+            f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}"
+            f"/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation"
+            f"?subject=Patient/{fhir_patient_id}"
+        )
+
+        headers = {
+            "Authorization": f"Bearer {get_gcp_token()}",
+            "Accept": "application/fhir+json"
+        }
+
+        res = requests.get(fhir_url, headers=headers)
+        if res.status_code != 200:
+            raise Exception(f"GCP FHIR Store Error ({res.status_code}): {res.text}")
+
+        bundle = res.json() or {}
+        entries = bundle.get("entry", [])
+        observations = []
+
+        for entry in entries:
+            resource = entry.get("resource", {})
+            obs_id = resource.get("id")
+            effective_date = resource.get("effectiveDateTime")
+            
+            value_qty = resource.get("valueQuantity", {})
+            value = value_qty.get("value")
+            unit = value_qty.get("unit")
+
+            coding = resource.get("code", {}).get("coding", [])
+            code = coding[0].get("code") if coding else None
+            display = coding[0].get("display") if coding else None
+            mapped_type = CODE_TO_TYPE_MAP.get(code, code or "unknown")
+
+            observations.append({
+                "id": obs_id,
+                "type": mapped_type,
+                "display": display,
+                "code": code,
+                "value": value,
+                "unit": unit,
+                "date": effective_date
+            })
+
+        observations.sort(key=lambda x: x.get("date") or "", reverse=True)
+        return observations
+
     finally:
         cur.close()
         conn.close()
