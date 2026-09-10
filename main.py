@@ -4,8 +4,14 @@ import psycopg2
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+# Import the FHIR blueprint from your newly created fhir_routes.py
+from fhir_routes import fhir_bp
+
 app = Flask(__name__)
 CORS(app)
+
+# Register the FHIR routes under the /provider prefix
+app.register_blueprint(fhir_bp)
 
 def get_db_connection():
     db_user = os.environ.get("DB_USER", "postgres")
