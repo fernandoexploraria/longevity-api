@@ -115,29 +115,31 @@ def get_patient_detail(phone):
             "whoop_user_id": row[10]
         }
         
-        # CORRECTED QUERY: using id, app_name, user_id, state, create_time, update_time
         cur.execute("""
-            SELECT id, app_name, user_id, state, create_time, update_time
-            FROM sessions
-            WHERE user_id = %s OR id = %s;
-        """, (phone, phone))
-        session_rows = cur.fetchall()
+            SELECT id, app_name, user_id, session_id, invocation_id, author, content, timestamp
+            FROM events
+            WHERE user_id = %s
+            ORDER BY timestamp ASC
+            LIMIT 500;
+        """, (phone,))
         
         conversation_history = []
-        for s_row in session_rows:
-            events_data = s_row[3]
-            if isinstance(events_data, str):
+        for e_row in cur.fetchall():
+            content_data = e_row[6]
+            if isinstance(content_data, str):
                 try:
-                    events_data = json.loads(events_data)
+                    content_data = json.loads(content_data)
                 except Exception:
                     pass
             conversation_history.append({
-                "session_id": s_row[0],
-                "app_name": s_row[1],
-                "user_id": s_row[2],
-                "state": events_data,
-                "create_time": s_row[4].isoformat() if s_row[4] else None,
-                "update_time": s_row[5].isoformat() if s_row[5] else None
+                "event_id": e_row[0],
+                "app_name": e_row[1],
+                "user_id": e_row[2],
+                "session_id": e_row[3],
+                "invocation_id": e_row[4],
+                "author": e_row[5],
+                "content": content_data,
+                "timestamp": e_row[7].isoformat() if e_row[7] else None
             })
             
         patient_data["conversation_history"] = conversation_history
