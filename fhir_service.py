@@ -53,34 +53,20 @@ def get_gcp_token() -> str:
 def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str:
     conn = get_db_connection()
     cur = conn.cursor()
-
     try:
-        cur.execute(
-            "SELECT fhir_patient_id, first_name FROM users WHERE phone_number = %s;",
-            (phone_number,)
-        )
+        cur.execute("SELECT fhir_patient_id, first_name FROM users WHERE phone_number = %s;", (phone_number,))
         row = cur.fetchone()
-
         if not row:
             raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
 
         fhir_patient_id, db_first_name = row[0], row[1]
-
         if fhir_patient_id:
             return fhir_patient_id
 
         patient_name = first_name if first_name else (db_first_name if db_first_name else "User")
-
-        fhir_url = (
-            f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}"
-            f"/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Patient"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {get_gcp_token()}",
-            "Content-Type": "application/fhir+json; charset=utf-8"
-        }
-
+        fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Patient"
+        headers = {"Authorization": f"Bearer {get_gcp_token()}", "Content-Type": "application/fhir+json; charset=utf-8"}
+        
         payload = {
             "resourceType": "Patient",
             "identifier": [{"system": "https://whatsapp.com", "value": phone_number}],
@@ -88,18 +74,13 @@ def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str
         }
 
         res = requests.post(fhir_url, headers=headers, json=payload)
-
         if res.status_code in [200, 201]:
             fhir_patient_id = res.json().get("id")
-            cur.execute(
-                "UPDATE users SET fhir_patient_id = %s WHERE phone_number = %s;",
-                (fhir_patient_id, phone_number)
-            )
+            cur.execute("UPDATE users SET fhir_patient_id = %s WHERE phone_number = %s;", (fhir_patient_id, phone_number))
             conn.commit()
             return fhir_patient_id
         else:
             raise Exception(f"GCP FHIR Store Error ({res.status_code}): {res.text}")
-
     finally:
         cur.close()
         conn.close()
@@ -107,35 +88,22 @@ def get_or_create_fhir_patient(phone_number: str, first_name: str = None) -> str
 def get_fhir_patient_record(phone_number: str) -> dict:
     conn = get_db_connection()
     cur = conn.cursor()
-
     try:
         cur.execute("SELECT fhir_patient_id FROM users WHERE phone_number = %s;", (phone_number,))
         row = cur.fetchone()
-
         if not row:
             raise PatientNotFoundError(f"User with phone_number '{phone_number}' does not exist.")
         if not row[0]:
             raise PatientNotFoundError(f"No FHIR Patient record found for phone_number '{phone_number}'.")
 
-        fhir_patient_id = row[0]
-
-        fhir_url = (
-            f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}"
-            f"/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Patient/{fhir_patient_id}"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {get_gcp_token()}",
-            "Accept": "application/fhir+json"
-        }
+        fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Patient/{row[0]}"
+        headers = {"Authorization": f"Bearer {get_gcp_token()}", "Accept": "application/fhir+json"}
 
         res = requests.get(fhir_url, headers=headers)
-
         if res.status_code == 200:
             return res.json()
         else:
             raise Exception(f"GCP FHIR Store Error ({res.status_code}): {res.text}")
-
     finally:
         cur.close()
         conn.close()
@@ -151,21 +119,13 @@ def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit
         if not row[0]:
             raise PatientNotFoundError(f"No FHIR Patient record found for '{phone_number}'.")
         
-        fhir_patient_id = row[0]
         obs_key = obs_type.lower().strip()
-        
         if obs_key not in LOINC_MAP:
             supported = ", ".join(sorted(set(LOINC_MAP.keys())))
             raise UnsupportedTypeError(f"Unsupported observation type '{obs_type}'. Supported types: {supported}")
 
         type_info = LOINC_MAP[obs_key]
-        code_payload = {
-            "coding": [{
-                "system": "http://loinc.org",
-                "code": type_info["code"],
-                "display": type_info["display"]
-            }]
-        }
+        code_payload = {"coding": [{"system": "http://loinc.org", "code": type_info["code"], "display": type_info["display"]}]}
 
         fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation"
         headers = {"Authorization": f"Bearer {get_gcp_token()}", "Content-Type": "application/fhir+json; charset=utf-8"}
@@ -175,14 +135,9 @@ def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit
             "status": "final",
             "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}]}],
             "code": code_payload,
-            "subject": {"reference": f"Patient/{fhir_patient_id}"},
+            "subject": {"reference": f"Patient/{row[0]}"},
             "effectiveDateTime": datetime.datetime.utcnow().isoformat() + "Z",
-            "valueQuantity": {
-                "value": value,
-                "unit": unit,
-                "system": "http://unitsofmeasure.org",
-                "code": unit
-            }
+            "valueQuantity": {"value": value, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit}
         }
 
         res = requests.post(fhir_url, headers=headers, json=payload)
@@ -205,18 +160,8 @@ def get_fhir_patient_observations(phone_number: str) -> list:
         if not row[0]:
             raise PatientNotFoundError(f"No FHIR Patient record found for '{phone_number}'.")
 
-        fhir_patient_id = row[0]
-
-        fhir_url = (
-            f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}"
-            f"/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation"
-            f"?subject=Patient/{fhir_patient_id}"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {get_gcp_token()}",
-            "Accept": "application/fhir+json"
-        }
+        fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation?subject=Patient/{row[0]}"
+        headers = {"Authorization": f"Bearer {get_gcp_token()}", "Accept": "application/fhir+json"}
 
         res = requests.get(fhir_url, headers=headers)
         if res.status_code != 200:
@@ -228,31 +173,44 @@ def get_fhir_patient_observations(phone_number: str) -> list:
 
         for entry in entries:
             resource = entry.get("resource", {})
-            obs_id = resource.get("id")
-            effective_date = resource.get("effectiveDateTime")
-            
-            value_qty = resource.get("valueQuantity", {})
-            value = value_qty.get("value")
-            unit = value_qty.get("unit")
-
             coding = resource.get("code", {}).get("coding", [])
             code = coding[0].get("code") if coding else None
-            display = coding[0].get("display") if coding else None
-            mapped_type = CODE_TO_TYPE_MAP.get(code, code or "unknown")
-
+            
             observations.append({
-                "id": obs_id,
-                "type": mapped_type,
-                "display": display,
+                "id": resource.get("id"),
+                "type": CODE_TO_TYPE_MAP.get(code, code or "unknown"),
+                "display": coding[0].get("display") if coding else None,
                 "code": code,
-                "value": value,
-                "unit": unit,
-                "date": effective_date
+                "value": resource.get("valueQuantity", {}).get("value"),
+                "unit": resource.get("valueQuantity", {}).get("unit"),
+                "date": resource.get("effectiveDateTime")
             })
 
         observations.sort(key=lambda x: x.get("date") or "", reverse=True)
         return observations
+    finally:
+        cur.close()
+        conn.close()
 
+def delete_fhir_observation(phone_number: str, observation_id: str) -> bool:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT fhir_patient_id FROM users WHERE phone_number = %s;", (phone_number,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            raise PatientNotFoundError(f"No FHIR Patient record found for '{phone_number}'.")
+
+        fhir_url = f"https://healthcare.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/datasets/{DATASET_ID}/fhirStores/{STORE_ID}/fhir/Observation/{observation_id}"
+        headers = {"Authorization": f"Bearer {get_gcp_token()}"}
+        
+        res = requests.delete(fhir_url, headers=headers)
+        if res.status_code in [200, 204]:
+            return True
+        elif res.status_code == 404:
+            raise Exception(f"Observation {observation_id} not found.")
+        else:
+            raise Exception(f"GCP FHIR Store Error ({res.status_code}): {res.text}")
     finally:
         cur.close()
         conn.close()
