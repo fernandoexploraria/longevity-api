@@ -28,6 +28,8 @@ LOINC_MAP = {
     "oxygen_saturation": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
     "spo2": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
     "body_fat": {"code": "41982-0", "display": "Percentage body fat", "default_unit": "%"},
+    "respiratory_rate": {"code": "9279-1", "display": "Respiratory rate", "default_unit": "/min"},
+    "blood_pressure": {"code": "85354-9", "display": "Blood pressure panel", "default_unit": "mmHg"},
 }
 
 CODE_TO_TYPE_MAP = {v["code"]: k for k, v in LOINC_MAP.items()}
@@ -108,7 +110,7 @@ def get_fhir_patient_record(phone_number: str) -> dict:
         cur.close()
         conn.close()
 
-def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit: str) -> str:
+def create_fhir_observation(phone_number: str, obs_type: str, value, unit: str) -> str:
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -137,8 +139,28 @@ def create_fhir_observation(phone_number: str, obs_type: str, value: float, unit
             "code": code_payload,
             "subject": {"reference": f"Patient/{row[0]}"},
             "effectiveDateTime": datetime.datetime.utcnow().isoformat() + "Z",
-            "valueQuantity": {"value": value, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit}
         }
+
+        # Handle composite blood pressure mapping
+        if obs_key == "blood_pressure":
+            if isinstance(value, str) and "/" in value:
+                sys_val, dia_val = value.split("/")
+                sys_val, dia_val = float(sys_val.strip()), float(dia_val.strip())
+            else:
+                raise ValueError("Blood pressure value must be formatted as 'systolic/diastolic' (e.g., '120/80')")
+                
+            payload["component"] = [
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure"}]},
+                    "valueQuantity": {"value": sys_val, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit}
+                },
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "8462-4", "display": "Diastolic blood pressure"}]},
+                    "valueQuantity": {"value": dia_val, "unit": unit, "system": "http://unitsofmeasure.org", "code": unit}
+                }
+            ]
+        else:
+            payload["valueQuantity"] = {"value": float(value), "unit": unit, "system": "http://unitsofmeasure.org", "code": unit}
 
         res = requests.post(fhir_url, headers=headers, json=payload)
         if res.status_code in [200, 201]:
@@ -176,13 +198,25 @@ def get_fhir_patient_observations(phone_number: str) -> list:
             coding = resource.get("code", {}).get("coding", [])
             code = coding[0].get("code") if coding else None
             
+            value = resource.get("valueQuantity", {}).get("value")
+            unit = resource.get("valueQuantity", {}).get("unit")
+            
+            # Extract composite values for blood pressure
+            if not value and "component" in resource:
+                components = resource["component"]
+                if len(components) >= 2:
+                    sys_val = components[0].get("valueQuantity", {}).get("value")
+                    dia_val = components[1].get("valueQuantity", {}).get("value")
+                    value = f"{sys_val}/{dia_val}"
+                    unit = components[0].get("valueQuantity", {}).get("unit")
+            
             observations.append({
                 "id": resource.get("id"),
                 "type": CODE_TO_TYPE_MAP.get(code, code or "unknown"),
                 "display": coding[0].get("display") if coding else None,
                 "code": code,
-                "value": resource.get("valueQuantity", {}).get("value"),
-                "unit": resource.get("valueQuantity", {}).get("unit"),
+                "value": value,
+                "unit": unit,
                 "date": resource.get("effectiveDateTime")
             })
 

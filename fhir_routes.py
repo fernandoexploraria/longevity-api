@@ -48,14 +48,14 @@ def get_patient(phone_number):
 def add_observation(phone_number):
     data = request.get_json() or {}
     obs_type = data.get("type")
-    value = data.get("value")
+    value = data.get("value") # No strict float cast here to support BP strings
     unit = data.get("unit")
     
     if not obs_type or value is None or not unit:
         return jsonify({"error": "Missing 'type', 'value', or 'unit' in payload"}), 400
         
     try:
-        obs_id = create_fhir_observation(phone_number, obs_type, float(value), unit)
+        obs_id = create_fhir_observation(phone_number, obs_type, value, unit)
         return jsonify({"status": "success", "phone_number": phone_number, "observation_id": obs_id}), 201
     except PatientNotFoundError as e:
         return jsonify({"error": str(e)}), 404
