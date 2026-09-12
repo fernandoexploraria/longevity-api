@@ -76,6 +76,21 @@ def list_observations(phone_number):
         print(f"Error in GET /provider/patient/{phone_number}/observations: {e}", file=sys.stderr)
         return jsonify({"error": str(e)}), 500
 
+@fhir_bp.route("/patient//observations/latest", methods=["GET"])
+def get_latest_observations(phone_number):
+    try:
+        latest = get_latest_fhir_observations_per_type(phone_number)
+        return jsonify({
+            "status": "success", 
+            "phone_number": phone_number, 
+            "latest_observations": latest
+        }), 200
+    except PatientNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error in GET /provider/patient/{phone_number}/observations/latest: {e}", file=sys.stderr)
+        return jsonify({"error": str(e)}), 500
+
 @fhir_bp.route("/patient/<phone_number>/observation/<observation_id>", methods=["DELETE"])
 def delete_observation(phone_number, observation_id):
     try:

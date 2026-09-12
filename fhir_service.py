@@ -246,6 +246,24 @@ def get_fhir_patient_observations(phone_number: str) -> list:
         cur.close()
         conn.close()
 
+def get_latest_fhir_observations_per_type(phone_number: str) -> dict:
+    """
+    Retrieves all patient observations and deduplicates them to return 
+    only the single most recent record for each distinct observation type.
+    Returns a dictionary keyed by type (e.g., {'heart_rate': {...}, 'blood_pressure': {...}}).
+    """
+    # 1. Fetch full observation list (already reverse-sorted by date in fhir_service.py)
+    all_observations = get_fhir_patient_observations(phone_number)
+    
+    latest_by_type = {}
+    for obs in all_observations:
+        obs_type = obs.get("type")
+        # Since the list is sorted newest-first, the first occurrence of a type is its latest record
+        if obs_type and obs_type not in latest_by_type:
+            latest_by_type[obs_type] = obs
+
+    return latest_by_type
+
 def delete_fhir_observation(phone_number: str, observation_id: str) -> bool:
     conn = get_db_connection()
     cur = conn.cursor()
