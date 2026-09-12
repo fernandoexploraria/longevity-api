@@ -1,10 +1,10 @@
 import os
 import sys
+import datetime
 import requests
 import psycopg2
 import google.auth
 from google.auth.transport.requests import Request
-import datetime
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "longevity-agent-507715")
 LOCATION = "us-central1"
@@ -17,22 +17,34 @@ class PatientNotFoundError(Exception):
 class UnsupportedTypeError(Exception):
     pass
 
+# Contract mapping frontend service-level keys to clinical LOINC standards
 LOINC_MAP = {
     "weight": {"code": "29463-7", "display": "Body Weight", "default_unit": "kg"},
     "body_weight": {"code": "29463-7", "display": "Body Weight", "default_unit": "kg"},
     "height": {"code": "8302-2", "display": "Body Height", "default_unit": "cm"},
     "body_height": {"code": "8302-2", "display": "Body Height", "default_unit": "cm"},
     "heart_rate": {"code": "8867-4", "display": "Heart rate", "default_unit": "bpm"},
+    "respiratory_rate": {"code": "9279-1", "display": "Respiratory rate", "default_unit": "/min"},
     "blood_glucose": {"code": "15074-8", "display": "Glucose in Blood", "default_unit": "mg/dL"},
     "body_temperature": {"code": "8310-5", "display": "Body temperature", "default_unit": "C"},
     "oxygen_saturation": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
     "spo2": {"code": "2708-6", "display": "Oxygen saturation", "default_unit": "%"},
     "body_fat": {"code": "41982-0", "display": "Percentage body fat", "default_unit": "%"},
-    "respiratory_rate": {"code": "9279-1", "display": "Respiratory rate", "default_unit": "/min"},
     "blood_pressure": {"code": "85354-9", "display": "Blood pressure panel", "default_unit": "mmHg"},
 }
 
-CODE_TO_TYPE_MAP = {v["code"]: k for k, v in LOINC_MAP.items()}
+# Reverse map LOINC codes back to UI keys for GET /observations queries
+CODE_TO_TYPE_MAP = {
+    "29463-7": "body_weight",
+    "8302-2": "body_height",
+    "8867-4": "heart_rate",
+    "9279-1": "respiratory_rate",
+    "15074-8": "blood_glucose",
+    "8310-5": "body_temperature",
+    "2708-6": "spo2",
+    "41982-0": "body_fat",
+    "85354-9": "blood_pressure"
+}
 
 def get_db_connection():
     db_user = os.environ.get("DB_USER", "postgres")
@@ -111,6 +123,10 @@ def get_fhir_patient_record(phone_number: str) -> dict:
         conn.close()
 
 def create_fhir_observation(phone_number: str, obs_type: str, value, unit: str) -> str:
+    """
+    Accepts UI service keys ('body_height', 'blood_pressure', etc.) and converts 
+    them into standardized FHIR Observation resources in GCP.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -141,7 +157,7 @@ def create_fhir_observation(phone_number: str, obs_type: str, value, unit: str) 
             "effectiveDateTime": datetime.datetime.utcnow().isoformat() + "Z",
         }
 
-        # Handle composite blood pressure mapping
+        # Handle Blood Pressure Panel (Systolic 8480-6 + Diastolic 8462-4)
         if obs_key == "blood_pressure":
             if isinstance(value, str) and "/" in value:
                 sys_val, dia_val = value.split("/")
@@ -172,6 +188,10 @@ def create_fhir_observation(phone_number: str, obs_type: str, value, unit: str) 
         conn.close()
 
 def get_fhir_patient_observations(phone_number: str) -> list:
+    """
+    Fetches observations from GCP FHIR Store and converts LOINC codes 
+    back into UI keys for Lovable frontend rendering.
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -201,13 +221,13 @@ def get_fhir_patient_observations(phone_number: str) -> list:
             value = resource.get("valueQuantity", {}).get("value")
             unit = resource.get("valueQuantity", {}).get("unit")
             
-            # Extract composite values for blood pressure
+            # Extract composite blood pressure values
             if not value and "component" in resource:
                 components = resource["component"]
                 if len(components) >= 2:
                     sys_val = components[0].get("valueQuantity", {}).get("value")
                     dia_val = components[1].get("valueQuantity", {}).get("value")
-                    value = f"{sys_val}/{dia_val}"
+                    value = f"{int(sys_val) if sys_val else ''}/{int(dia_val) if dia_val else ''}"
                     unit = components[0].get("valueQuantity", {}).get("unit")
             
             observations.append({
