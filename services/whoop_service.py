@@ -2,7 +2,11 @@ import os
 import requests
 import psycopg2
 import concurrent.futures
+import threading
 from datetime import datetime, timezone, timedelta
+
+# Lock to prevent race conditions during concurrent token refreshes
+token_refresh_lock = threading.Lock()
 
 def get_db_connection():
     db_user = os.environ.get("DB_USER", "postgres")
@@ -14,58 +18,105 @@ def get_db_connection():
     )
 
 def _get_valid_whoop_token(phone_number: str, force_refresh: bool = False) -> str:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT w.access_token, w.refresh_token, w.token_expires_at, w.whoop_user_id
-            FROM whoop_connections w
-            JOIN users u ON u.id = w.user_id
-            WHERE u.phone_number = %s;
-        """, (phone_number,))
-        row = cur.fetchone()
-        
-        if not row:
-            raise ValueError("not_connected")
+    with token_refresh_lock:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT w.access_token, w.refresh_token, w.token_expires_at, w.whoop_user_id
+                FROM whoop_connections w
+                JOIN users u ON u.id = w.user_id
+                WHERE u.phone_number = %s;
+            """, (phone_number,))
+            row = cur.fetchone()
             
-        access_token, refresh_token, expires_at, whoop_user_id = row
-        now = datetime.now(timezone.utc)
-        
-        if not force_refresh and expires_at and expires_at.replace(tzinfo=timezone.utc) > (now + timedelta(seconds=60)):
-            return access_token
+            if not row:
+                raise ValueError("not_connected")
+                
+            access_token, refresh_token, expires_at, whoop_user_id = row
+            now = datetime.now(timezone.utc)
+            
+            # 1. Proactive check
+            if not force_refresh and expires_at and expires_at.replace(tzinfo=timezone.utc) > (now + timedelta(seconds=60)):
+                return access_token
 
-        client_id = os.environ.get("WHOOP_CLIENT_ID")
-        client_secret = os.environ.get("WHOOP_CLIENT_SECRET")
+            # Prevent concurrent workers from double-refreshing if another thread just updated it
+            if force_refresh and expires_at and expires_at.replace(tzinfo=timezone.utc) > (now + timedelta(seconds=60)):
+                return access_token
+
+            client_id = os.environ.get("WHOOP_CLIENT_ID")
+            client_secret = os.environ.get("WHOOP_CLIENT_SECRET")
+            
+            res = requests.post("https://api.prod.whoop.com/oauth/oauth2/token", data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": "offline"
+            })
+            
+            if res.status_code in [400, 401]:
+                raise ValueError("whoop_reauth_required")
+                
+            res.raise_for_status()
+            token_data = res.json()
+            
+            new_access = token_data["access_token"]
+            new_refresh = token_data["refresh_token"]
+            expires_in = token_data["expires_in"]
+            
+            cur.execute("""
+                UPDATE whoop_connections 
+                SET access_token = %s, refresh_token = %s, token_expires_at = NOW() + %s * INTERVAL '1 second'
+                FROM users
+                WHERE whoop_connections.user_id = users.id AND users.phone_number = %s;
+            """, (new_access, new_refresh, expires_in, phone_number))
+            conn.commit()
+            return new_access
+        finally:
+            cur.close()
+            conn.close()
+
+def _hybrid_whoop_fetch(phone_number: str, url: str, is_list: bool = False, max_pages: int = 6):
+    """The Hybrid Strategy: Proactive DB check + Reactive 401 fallback"""
+    token = _get_valid_whoop_token(phone_number)
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": "Longevity-Console/1.0"}
+    
+    res = requests.get(url, headers=headers)
+    
+    # Reactive Fallback
+    if res.status_code == 401:
+        token = _get_valid_whoop_token(phone_number, force_refresh=True)
+        headers["Authorization"] = f"Bearer {token}"
+        res = requests.get(url, headers=headers)
         
-        res = requests.post("https://api.prod.whoop.com/oauth/oauth2/token", data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scope": "offline"
-        })
+    res.raise_for_status()
+    data = res.json()
+    
+    if not is_list:
+        return data
         
-        if res.status_code in [400, 401]:
-            raise ValueError("whoop_reauth_required")
+    # Handle Pagination
+    records = data.get("records", [])
+    next_token = data.get("next_token")
+    pages = 1
+    
+    while next_token and pages < max_pages:
+        next_url = f"{url}&nextToken={next_token}" if "?" in url else f"{url}?nextToken={next_token}"
+        res = requests.get(next_url, headers=headers)
+        
+        if res.status_code == 401:
+            token = _get_valid_whoop_token(phone_number, force_refresh=True)
+            headers["Authorization"] = f"Bearer {token}"
+            res = requests.get(next_url, headers=headers)
             
         res.raise_for_status()
-        token_data = res.json()
+        page_data = res.json()
+        records.extend(page_data.get("records", []))
+        next_token = page_data.get("next_token")
+        pages += 1
         
-        new_access = token_data["access_token"]
-        new_refresh = token_data["refresh_token"]
-        expires_in = token_data["expires_in"]
-        
-        cur.execute("""
-            UPDATE whoop_connections 
-            SET access_token = %s, refresh_token = %s, token_expires_at = NOW() + %s * INTERVAL '1 second'
-            FROM users
-            WHERE whoop_connections.user_id = users.id AND users.phone_number = %s;
-        """, (new_access, new_refresh, expires_in, phone_number))
-        conn.commit()
-        return new_access
-    finally:
-        cur.close()
-        conn.close()
+    return records
 
 def get_whoop_status(phone_number: str) -> dict:
     conn = get_db_connection()
@@ -101,53 +152,29 @@ def get_whoop_status(phone_number: str) -> dict:
 def force_whoop_refresh(phone_number: str) -> dict:
     try:
         new_token = _get_valid_whoop_token(phone_number, force_refresh=True)
-        headers = {"Authorization": f"Bearer {new_token}", "User-Agent": "Longevity-Console/1.0"}
-        res = requests.get("https://api.prod.whoop.com/developer/v2/user/profile/basic", headers=headers)
-        if res.status_code in [400, 401]:
-            raise ValueError("whoop_reauth_required")
+        # Using hybrid fetch to verify it works
+        _hybrid_whoop_fetch(phone_number, "https://api.prod.whoop.com/developer/v2/user/profile/basic")
         return get_whoop_status(phone_number)
     except ValueError as e:
         return {"status": "error", "reason": str(e)}
 
-def _fetch_whoop_paginated(token: str, base_url: str, max_pages: int = 6):
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": "Longevity-Console/1.0"}
-    records = []
-    next_token = None
-    pages = 0
-    
-    while pages < max_pages:
-        url = base_url if not next_token else f"{base_url}&nextToken={next_token}"
-        res = requests.get(url, headers=headers)
-        res.raise_for_status()
-        data = res.json()
-        records.extend(data.get("records", []))
-        
-        next_token = data.get("next_token")
-        if not next_token:
-            break
-        pages += 1
-    return records
-
 def get_whoop_latest(phone_number: str) -> dict:
     try:
-        token = _get_valid_whoop_token(phone_number)
+        # Pre-flight check to fail fast if DB missing
+        _get_valid_whoop_token(phone_number)
     except ValueError as e:
         return {"status": "error", "reason": str(e)}
 
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": "Longevity-Console/1.0"}
-    
-    def fetch_one(endpoint):
+    def safe_fetch(endpoint):
         try:
-            res = requests.get(f"https://api.prod.whoop.com/developer/v2/{endpoint}?limit=1", headers=headers)
-            res.raise_for_status()
-            records = res.json().get("records", [])
+            records = _hybrid_whoop_fetch(phone_number, f"https://api.prod.whoop.com/developer/v2/{endpoint}?limit=1", is_list=True, max_pages=1)
             return records[0] if records else None
         except Exception:
             return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_cycle = executor.submit(fetch_one, "cycle")
-        f_recovery = executor.submit(fetch_one, "recovery")
+        f_cycle = executor.submit(safe_fetch, "cycle")
+        f_recovery = executor.submit(safe_fetch, "recovery")
         raw_cycle = f_cycle.result()
         raw_recovery = f_recovery.result()
 
@@ -179,7 +206,7 @@ def get_whoop_latest(phone_number: str) -> dict:
 
 def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
     try:
-        token = _get_valid_whoop_token(phone_number)
+        _get_valid_whoop_token(phone_number)
     except ValueError as e:
         return {"status": "error", "reason": str(e)}
 
@@ -188,16 +215,11 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
     start_time = (now - timedelta(days=days)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     end_time = now.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
-    headers = {"Authorization": f"Bearer {token}", "User-Agent": "Longevity-Console/1.0"}
     errors = []
 
     def safe_fetch(url_type, url, is_list=False):
         try:
-            if is_list:
-                return _fetch_whoop_paginated(token, url, max_pages=6)
-            res = requests.get(url, headers=headers)
-            res.raise_for_status()
-            return res.json()
+            return _hybrid_whoop_fetch(phone_number, url, is_list=is_list)
         except Exception as e:
             errors.append(f"{url_type} failed: {str(e)}")
             return [] if is_list else None
@@ -212,10 +234,10 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
 
         raw_prof = f_prof.result() or {}
         raw_body = f_body.result() or {}
-        raw_cyc = f_cyc.result()
-        raw_rec = f_rec.result()
-        raw_slp = f_slp.result()
-        raw_wkt = f_wkt.result()
+        raw_cyc = f_cyc.result() or []
+        raw_rec = f_rec.result() or []
+        raw_slp = f_slp.result() or []
+        raw_wkt = f_wkt.result() or []
 
     def m2m(val): return round(val / 60000) if val else 0
 
