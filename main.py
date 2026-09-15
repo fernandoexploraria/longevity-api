@@ -3,6 +3,7 @@ import json
 import psycopg2
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from services.whoop_service import get_whoop_status, force_whoop_refresh, get_whoop_latest, get_whoop_summary
 
 app = Flask(__name__)
 CORS(app)
@@ -133,80 +134,39 @@ def get_patient_detail(phone_number):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients/<phone_number>/whoop-connection", methods=["GET"])
-def get_whoop_connection(phone_number):
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT 
-                w.whoop_user_id, 
-                w.access_token, 
-                w.refresh_token, 
-                w.token_expires_at, 
-                w.scopes
-            FROM whoop_connections w
-            JOIN users u ON u.id = w.user_id
-            WHERE u.phone_number = %s;
-        """, (phone_number,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        
-        if not row:
-            return jsonify({"error": "Whoop connection not found for this patient"}), 404
-            
-        connection_data = {
-            "whoop_user_id": row[0],
-            "access_token": row[1],
-            "refresh_token": row[2],
-            "token_expires_at": row[3].isoformat() if row[3] else None,
-            "scopes": row[4]
-        }
-        return jsonify(connection_data), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route("/api/patients/<phone_number>/whoop/status", methods=["GET"])
+def api_whoop_status(phone_number):
+    result = get_whoop_status(phone_number)
+    if result.get("status") == "error":
+        return jsonify(result), 409
+    return jsonify(result), 200
 
-@app.route("/api/patients/<phone_number>/whoop-connection", methods=["PUT"])
-def update_whoop_connection(phone_number):
+@app.route("/api/patients/<phone_number>/whoop/refresh", methods=["POST"])
+def api_whoop_refresh(phone_number):
+    result = force_whoop_refresh(phone_number)
+    if result.get("status") == "error":
+        return jsonify(result), 409
+    return jsonify(result), 200
+
+@app.route("/api/patients/<phone_number>/whoop/latest", methods=["GET"])
+def api_whoop_latest(phone_number):
+    result = get_whoop_latest(phone_number)
+    if result.get("status") == "error":
+        # 409 means token invalid or patient not found based on our internal spec
+        return jsonify(result), 409 if result.get("reason") in ["not_connected", "whoop_reauth_required"] else 500
+    return jsonify(result), 200
+
+@app.route("/api/patients/<phone_number>/whoop/summary", methods=["GET"])
+def api_whoop_summary(phone_number):
     try:
-        data = request.get_json() or {}
-        new_access_token = data.get("access_token")
-        new_refresh_token = data.get("refresh_token")
-        expires_in = data.get("expires_in", 3600)
+        days = int(request.args.get("days", 30))
+    except ValueError:
+        days = 30
         
-        if not new_access_token or not new_refresh_token:
-            return jsonify({"error": "Missing access_token or refresh_token in payload"}), 400
-            
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            UPDATE whoop_connections 
-            SET 
-                access_token = %s,
-                refresh_token = %s,
-                token_expires_at = NOW() + %s * INTERVAL '1 second'
-            FROM users
-            WHERE whoop_connections.user_id = users.id AND users.phone_number = %s
-            RETURNING whoop_connections.whoop_user_id, whoop_connections.token_expires_at;
-        """, (new_access_token, new_refresh_token, expires_in, phone_number))
-        
-        updated = cur.fetchone()
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        if not updated:
-            return jsonify({"error": "Patient or Whoop connection not found"}), 404
-            
-        return jsonify({
-            "status": "success",
-            "whoop_user_id": updated[0],
-            "token_expires_at": updated[1].isoformat() if updated[1] else None
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    result = get_whoop_summary(phone_number, days)
+    if result.get("status") == "error":
+        return jsonify(result), 409 if result.get("reason") in ["not_connected", "whoop_reauth_required"] else 500
+    return jsonify(result), 200   
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
