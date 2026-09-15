@@ -4,14 +4,8 @@ import psycopg2
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-# Import the FHIR blueprint from your newly created fhir_routes.py
-from fhir_routes import fhir_bp
-
 app = Flask(__name__)
 CORS(app)
-
-# Register the FHIR routes under the /provider prefix
-app.register_blueprint(fhir_bp)
 
 def get_db_connection():
     db_user = os.environ.get("DB_USER", "postgres")
@@ -25,22 +19,6 @@ def get_db_connection():
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({"status": "Longevity API is active and ready."}), 200
-
-@app.route("/api/users", methods=["GET"])
-def get_users():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id, phone_number, first_name, last_name, email FROM users;")
-        users = [
-            {"id": row[0], "phone": row[1], "first_name": row[2], "last_name": row[3], "email": row[4]} 
-            for row in cur.fetchall()
-        ]
-        cur.close()
-        conn.close()
-        return jsonify(users), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/patients", methods=["GET"])
 def get_patients():
@@ -86,7 +64,7 @@ def get_patients():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients/<phone>", methods=["GET"])
+@app.route("/api/patients/", methods=["GET"])
 def get_patient_detail(phone):
     try:
         conn = get_db_connection()
@@ -155,39 +133,7 @@ def get_patient_detail(phone):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients/<phone>/fhir", methods=["GET"])
-def get_patient_fhir(phone):
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, phone_number, first_name, last_name, email, height_meter, weight_kilogram
-            FROM users 
-            WHERE phone_number = %s;
-        """, (phone,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        
-        if not row:
-            return jsonify({"error": "Patient not found"}), 404
-            
-        fhir_data = {
-            "fhir_patient_id": f"pat-{row[0]}",
-            "db_id": row[0],
-            "phone_number": row[1],
-            "first_name": row[2],
-            "last_name": row[3],
-            "email": row[4],
-            "height_meter": float(row[5]) if row[5] is not None else None,
-            "weight_kilogram": float(row[6]) if row[6] is not None else None,
-            "resource_type": "Patient"
-        }
-        return jsonify(fhir_data), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/patients/<phone>/whoop-connection", methods=["GET"])
+@app.route("/api/patients//whoop-connection", methods=["GET"])
 def get_whoop_connection(phone):
     try:
         conn = get_db_connection()
@@ -221,7 +167,7 @@ def get_whoop_connection(phone):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients/<phone>/whoop-connection", methods=["PUT"])
+@app.route("/api/patients//whoop-connection", methods=["PUT"])
 def update_whoop_connection(phone):
     try:
         data = request.get_json() or {}
