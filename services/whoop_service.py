@@ -109,10 +109,7 @@ def force_whoop_refresh(phone_number: str) -> dict:
     except ValueError as e:
         return {"status": "error", "reason": str(e)}
 
-# --- NEW DATA FETCHING LOGIC BELOW ---
-
 def _fetch_whoop_paginated(token: str, base_url: str, max_pages: int = 6):
-    """Helper to fetch up to max_pages of WHOOP data."""
     headers = {"Authorization": f"Bearer {token}", "User-Agent": "Longevity-Console/1.0"}
     records = []
     next_token = None
@@ -132,7 +129,6 @@ def _fetch_whoop_paginated(token: str, base_url: str, max_pages: int = 6):
     return records
 
 def get_whoop_latest(phone_number: str) -> dict:
-    """Fetches the single most recent cycle and recovery."""
     try:
         token = _get_valid_whoop_token(phone_number)
     except ValueError as e:
@@ -157,7 +153,7 @@ def get_whoop_latest(phone_number: str) -> dict:
 
     cycle_data = None
     if raw_cycle:
-        c_score = raw_cycle.get("score", {})
+        c_score = raw_cycle.get("score") or {}
         cycle_data = {
             "id": raw_cycle.get("id"), "start": raw_cycle.get("start"), "end": raw_cycle.get("end"),
             "strain": c_score.get("strain"), "average_heart_rate": c_score.get("average_heart_rate"),
@@ -167,7 +163,7 @@ def get_whoop_latest(phone_number: str) -> dict:
 
     recovery_data = None
     if raw_recovery:
-        r_score = raw_recovery.get("score", {})
+        r_score = raw_recovery.get("score") or {}
         recovery_data = {
             "recovery_score": r_score.get("recovery_score"), "resting_heart_rate": r_score.get("resting_heart_rate"),
             "hrv_rmssd_milli": r_score.get("hrv_rmssd_milli"), "spo2_percentage": r_score.get("spo2_percentage"),
@@ -182,13 +178,11 @@ def get_whoop_latest(phone_number: str) -> dict:
     }
 
 def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
-    """Fetches full historical context across 6 endpoints in parallel."""
     try:
         token = _get_valid_whoop_token(phone_number)
     except ValueError as e:
         return {"status": "error", "reason": str(e)}
 
-    # Clamp days between 1 and 90
     days = max(1, min(days, 90))
     now = datetime.now(timezone.utc)
     start_time = (now - timedelta(days=days)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
@@ -208,7 +202,6 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
             errors.append(f"{url_type} failed: {str(e)}")
             return [] if is_list else None
 
-    # Fetch all endpoints concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         f_prof = executor.submit(safe_fetch, "profile", "https://api.prod.whoop.com/developer/v2/user/profile/basic")
         f_body = executor.submit(safe_fetch, "body", "https://api.prod.whoop.com/developer/v2/user/measurement/body")
@@ -224,18 +217,17 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
         raw_slp = f_slp.result()
         raw_wkt = f_wkt.result()
 
-    # Mappers
     def m2m(val): return round(val / 60000) if val else 0
 
-    cycles = [{"id": c.get("id"), "start": c.get("start"), "end": c.get("end"), "strain": c.get("score",{}).get("strain"), "average_heart_rate": c.get("score",{}).get("average_heart_rate"), "max_heart_rate": c.get("score",{}).get("max_heart_rate"), "kilojoule": c.get("score",{}).get("kilojoule"), "score_state": c.get("score_state")} for c in raw_cyc]
+    cycles = [{"id": c.get("id"), "start": c.get("start"), "end": c.get("end"), "strain": (c.get("score") or {}).get("strain"), "average_heart_rate": (c.get("score") or {}).get("average_heart_rate"), "max_heart_rate": (c.get("score") or {}).get("max_heart_rate"), "kilojoule": (c.get("score") or {}).get("kilojoule"), "score_state": c.get("score_state")} for c in raw_cyc]
     
-    recoveries = [{"cycle_id": r.get("cycle_id"), "sleep_id": r.get("sleep_id"), "created_at": r.get("created_at"), "recovery_score": r.get("score",{}).get("recovery_score"), "resting_heart_rate": r.get("score",{}).get("resting_heart_rate"), "hrv_rmssd_milli": r.get("score",{}).get("hrv_rmssd_milli"), "spo2_percentage": r.get("score",{}).get("spo2_percentage"), "skin_temp_celsius": r.get("score",{}).get("skin_temp_celsius"), "user_calibrating": r.get("user_calibrating")} for r in raw_rec]
+    recoveries = [{"cycle_id": r.get("cycle_id"), "sleep_id": r.get("sleep_id"), "created_at": r.get("created_at"), "recovery_score": (r.get("score") or {}).get("recovery_score"), "resting_heart_rate": (r.get("score") or {}).get("resting_heart_rate"), "hrv_rmssd_milli": (r.get("score") or {}).get("hrv_rmssd_milli"), "spo2_percentage": (r.get("score") or {}).get("spo2_percentage"), "skin_temp_celsius": (r.get("score") or {}).get("skin_temp_celsius"), "user_calibrating": r.get("user_calibrating")} for r in raw_rec]
 
     sleeps = []
     for s in raw_slp:
-        sc = s.get("score", {})
-        st = sc.get("stage_summary", {})
-        nd = sc.get("sleep_needed", {})
+        sc = s.get("score") or {}
+        st = sc.get("stage_summary") or {}
+        nd = sc.get("sleep_needed") or {}
         needed_ms = nd.get("baseline_milli", 0) + nd.get("need_from_sleep_debt_milli", 0) + nd.get("need_from_recent_naps_milli", 0)
         sleeps.append({
             "id": s.get("id"), "start": s.get("start"), "end": s.get("end"), "nap": s.get("nap"),
@@ -248,8 +240,8 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
 
     workouts = []
     for w in raw_wkt:
-        sc = w.get("score", {})
-        zd = sc.get("zone_durations", {})
+        sc = w.get("score") or {}
+        zd = sc.get("zone_durations") or {}
         zm = [m2m(zd.get("zone_zero_milli", 0)), m2m(zd.get("zone_one_milli", 0)), m2m(zd.get("zone_two_milli", 0)),
               m2m(zd.get("zone_three_milli", 0)), m2m(zd.get("zone_four_milli", 0)), m2m(zd.get("zone_five_milli", 0))]
         workouts.append({
@@ -259,7 +251,6 @@ def get_whoop_summary(phone_number: str, days: int = 30) -> dict:
             "zone_minutes": zm
         })
 
-    # Sort newest first and cap arrays
     def date_sort(x): return x.get("start") or x.get("created_at") or ""
     cycles = sorted(cycles, key=date_sort, reverse=True)[:30]
     recoveries = sorted(recoveries, key=date_sort, reverse=True)[:30]
