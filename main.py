@@ -64,8 +64,8 @@ def get_patients():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients/", methods=["GET"])
-def get_patient_detail(phone):
+@app.route("/api/patients/<phone_number>", methods=["GET"])
+def get_patient_detail(phone_number):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -78,7 +78,7 @@ def get_patient_detail(phone):
             FROM users u
             LEFT JOIN whoop_connections w ON u.id = w.user_id
             WHERE u.phone_number = %s;
-        """, (phone,))
+        """, (phone_number,))
         row = cur.fetchone()
         if not row:
             cur.close()
@@ -105,7 +105,7 @@ def get_patient_detail(phone):
             WHERE user_id = %s
             ORDER BY timestamp ASC
             LIMIT 500;
-        """, (phone,))
+        """, (phone_number,))
         
         conversation_history = []
         for e_row in cur.fetchall():
@@ -133,8 +133,8 @@ def get_patient_detail(phone):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients//whoop-connection", methods=["GET"])
-def get_whoop_connection(phone):
+@app.route("/api/patients/<phone_number>/whoop-connection", methods=["GET"])
+def get_whoop_connection(phone_number):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -148,7 +148,7 @@ def get_whoop_connection(phone):
             FROM whoop_connections w
             JOIN users u ON u.id = w.user_id
             WHERE u.phone_number = %s;
-        """, (phone,))
+        """, (phone_number,))
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -167,8 +167,8 @@ def get_whoop_connection(phone):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/patients//whoop-connection", methods=["PUT"])
-def update_whoop_connection(phone):
+@app.route("/api/patients/<phone_number>/whoop-connection", methods=["PUT"])
+def update_whoop_connection(phone_number):
     try:
         data = request.get_json() or {}
         new_access_token = data.get("access_token")
@@ -190,7 +190,7 @@ def update_whoop_connection(phone):
             FROM users
             WHERE whoop_connections.user_id = users.id AND users.phone_number = %s
             RETURNING whoop_connections.whoop_user_id, whoop_connections.token_expires_at;
-        """, (new_access_token, new_refresh_token, expires_in, phone))
+        """, (new_access_token, new_refresh_token, expires_in, phone_number))
         
         updated = cur.fetchone()
         conn.commit()
